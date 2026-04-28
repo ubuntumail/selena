@@ -1,6 +1,6 @@
 export const config = { runtime: "edge" };
 
-const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
+const TARGET_BASE = process.env.TARGET_DOMAIN?.replace(/\/$/, "");
 
 const STRIP_HEADERS = new Set([
   "host",
@@ -20,43 +20,62 @@ const STRIP_HEADERS = new Set([
 
 export default async function handler(req) {
   if (!TARGET_BASE) {
-    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
+    return new Response("Server misconfigured", { status: 500 });
   }
 
   try {
-    const pathStart = req.url.indexOf("/", 8);
-    const targetUrl =
-      pathStart === -1 ? TARGET_BASE + "/" : TARGET_BASE + req.url.slice(pathStart);
+    const url = new URL(req.url);
 
-    const out = new Headers();
-    let clientIp = null;
-    for (const [k, v] of req.headers) {
+    const targetUrl = TARGET_BASE + url.pathname + url.search;
+
+    const headers = new Headers();
+
+    let clientIp;
+
+    for (const [key, value] of req.headers.entries()) {
+      const k = key.toLowerCase();
+
       if (STRIP_HEADERS.has(k)) continue;
       if (k.startsWith("x-vercel-")) continue;
+
       if (k === "x-real-ip") {
-        clientIp = v;
+        clientIp = value;
         continue;
       }
+
       if (k === "x-forwarded-for") {
-        if (!clientIp) clientIp = v;
+        clientIp ||= value;
         continue;
       }
-      out.set(k, v);
+
+      headers.set(k, value);
     }
-    if (clientIp) out.set("x-forwarded-for", clientIp);
+
+    if (clientIp) {
+      headers.set("x-forwarded-for", clientIp);
+    }
 
     const method = req.method;
-    const hasBody = method !== "GET" && method !== "HEAD";
+    const bodyAllowed = !["GET", "HEAD"].includes(method);
 
-    return await fetch(targetUrl, {
+    const response = await fetch(targetUrl, {
       method,
-      headers: out,
-      body: hasBody ? req.body : undefined,
-      duplex: "half",
+      headers,
+      body: bodyAllowed ? req.body : undefined,
       redirect: "manual",
     });
-  } catch (err) {
-    console.error("relay error:", err);
-    return new Response("Bad Gateway: Tunnel Failed", { status: 502 });
+
+    // Optional: clone response for safety in edge runtime
+    return new Response(response.body, {
+      status: response.status,
+      headers: response.headers,
+    });
+
+  } catch (error) {
+    console.error("Proxy error:", error);
+
+    return new Response("Bad Gateway", {
+      status: 502,
+    });
   }
 }
